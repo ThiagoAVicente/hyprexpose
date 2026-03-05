@@ -1,5 +1,6 @@
 # hyprexpose
 
+[![AUR](https://img.shields.io/aur/version/hyprexpose-git)](https://aur.archlinux.org/packages/hyprexpose-git)
 ![vibecoded](https://img.shields.io/badge/vibecoded-ff69b4?style=flat&logo=sparkles&logoColor=white)
 
 Lightweight workspace overview for [Hyprland](https://hyprland.org). Shows active workspaces with real window thumbnails, navigate with keyboard, press Enter to switch.
