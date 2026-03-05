@@ -1,10 +1,10 @@
-# Maintainer: TODO <todo@example.com>
+# Maintainer: ThiagoAVicente <todo@example.com>
 pkgname=hyprexpose-git
 pkgver=r0
 pkgrel=1
 pkgdesc='Lightweight workspace overview for Hyprland with live window thumbnails'
 arch=('x86_64')
-url='https://github.com/TODO/hyprexpose'
+url='https://github.com/ThiagoAVicente/hyprexpose'
 license=('MIT')
 depends=('wayland' 'cairo' 'pango' 'hyprland')
 makedepends=('git' 'wayland-protocols')
