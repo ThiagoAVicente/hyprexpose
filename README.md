@@ -39,7 +39,13 @@ make
 Start the daemon:
 
 ```
-./hyprexpose &
+hyprexpose &
+```
+
+Disable window previews (uses colored rectangles instead):
+
+```
+hyprexpose --no-preview &
 ```
 
 Toggle the overlay:

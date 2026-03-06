@@ -38,6 +38,7 @@ struct App {
     std::vector<WorkspaceInfo> workspaces;
     std::vector<Thumbnail> thumbnails;
     int selected = 0;
+    bool no_preview = false;
 
     void refresh_data() {
         workspaces = ipc::get_workspaces();
@@ -48,12 +49,14 @@ struct App {
         thumbnails.clear();
 
         // Capture thumbnails for all windows
-        for (auto &ws : workspaces) {
-            for (auto &c : ws.clients) {
-                auto thumb = capture::capture_toplevel(
-                    surf.toplevel_export, surf.shm, surf.display, c.address);
-                if (thumb.ready)
-                    thumbnails.push_back(thumb);
+        if (!no_preview) {
+            for (auto &ws : workspaces) {
+                for (auto &c : ws.clients) {
+                    auto thumb = capture::capture_toplevel(
+                        surf.toplevel_export, surf.shm, surf.display, c.address);
+                    if (thumb.ready)
+                        thumbnails.push_back(thumb);
+                }
             }
         }
 
@@ -125,7 +128,7 @@ struct App {
     }
 };
 
-int main() {
+int main(int argc, char *argv[]) {
     struct sigaction sa{};
     sa.sa_handler = sig_handler;
     sigemptyset(&sa.sa_mask);
@@ -134,6 +137,15 @@ int main() {
     sigaction(SIGTERM, &sa, nullptr);
 
     App app;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--no-preview") == 0) {
+            app.no_preview = true;
+        } else {
+            fprintf(stderr, "Usage: hyprexpose [--no-preview]\n");
+            return 1;
+        }
+    }
 
     if (!surface::init(app.surf)) return 1;
     if (!surface::create_overlay(app.surf)) {
