@@ -29,6 +29,12 @@ struct State {
     zwlr_layer_surface_v1 *layer_surface = nullptr;
     hyprland_toplevel_export_manager_v1 *toplevel_export = nullptr;
 
+    // Render buffer (reused across redraws, freed on hide)
+    wl_buffer *buf = nullptr;
+    uint8_t *buf_data = nullptr;
+    size_t buf_size = 0;
+    uint32_t buf_stride = 0;
+
     uint32_t width = 0;
     uint32_t height = 0;
     bool configured = false;
@@ -50,11 +56,14 @@ void show(State &s);
 // Hide the overlay (attach null buffer)
 void hide(State &s);
 
-// Create a SHM buffer for rendering, returns pixel data pointer
-uint8_t *create_buffer(State &s, uint32_t w, uint32_t h, uint32_t &stride, struct wl_buffer **buf_out);
+// Get or create a SHM buffer for rendering, returns pixel data pointer
+uint8_t *get_buffer(State &s, uint32_t w, uint32_t h, uint32_t &stride);
+
+// Free the render buffer
+void free_buffer(State &s);
 
 // Attach buffer and commit surface
-void commit(State &s, struct wl_buffer *buf);
+void commit(State &s);
 
 // Dispatch wayland events (blocking)
 int dispatch(State &s);

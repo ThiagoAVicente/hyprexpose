@@ -68,17 +68,23 @@ struct App {
         }
     }
 
+    void free_data() {
+        for (auto &t : thumbnails)
+            capture::free_thumbnail(t);
+        thumbnails.clear();
+        workspaces.clear();
+    }
+
     void redraw() {
         if (!surf.configured || surf.width == 0 || surf.height == 0) return;
 
         uint32_t stride;
-        struct wl_buffer *buf;
-        auto *pixels = surface::create_buffer(surf, surf.width, surf.height, stride, &buf);
+        auto *pixels = surface::get_buffer(surf, surf.width, surf.height, stride);
         if (!pixels) return;
 
         render::RenderContext ctx{pixels, surf.width, surf.height, stride};
         render::draw(ctx, workspaces, selected, thumbnails);
-        surface::commit(surf, buf);
+        surface::commit(surf);
     }
 
     bool handle_key(uint32_t keysym) {
@@ -148,6 +154,7 @@ int main() {
             g_toggle = 0;
             if (app.surf.visible) {
                 surface::hide(app.surf);
+                app.free_data();
                 surface::flush(app.surf);
             } else {
                 surface::show(app.surf);
@@ -159,6 +166,7 @@ int main() {
 
         if (app.surf.should_close && app.surf.visible) {
             surface::hide(app.surf);
+            app.free_data();
             surface::flush(app.surf);
             app.surf.should_close = false;
         }
@@ -188,9 +196,7 @@ int main() {
         surface::flush(app.surf);
     }
 
-    // Cleanup
-    for (auto &t : app.thumbnails)
-        capture::free_thumbnail(t);
+    app.free_data();
     surface::destroy(app.surf);
 
     return 0;

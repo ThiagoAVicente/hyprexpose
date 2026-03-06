@@ -198,6 +198,7 @@ void show(State &s) {
 }
 
 void hide(State &s) {
+    free_buffer(s);
     if (s.layer_surface) {
         zwlr_layer_surface_v1_destroy(s.layer_surface);
         s.layer_surface = nullptr;
@@ -210,9 +211,24 @@ void hide(State &s) {
     s.visible = false;
 }
 
-uint8_t *create_buffer(State &s, uint32_t w, uint32_t h, uint32_t &stride, struct wl_buffer **buf_out) {
+void free_buffer(State &s) {
+    if (s.buf) { wl_buffer_destroy(s.buf); s.buf = nullptr; }
+    if (s.buf_data) { munmap(s.buf_data, s.buf_size); s.buf_data = nullptr; }
+    s.buf_size = 0;
+    s.buf_stride = 0;
+}
+
+uint8_t *get_buffer(State &s, uint32_t w, uint32_t h, uint32_t &stride) {
     stride = w * 4;
-    size_t size = stride * h;
+    size_t size = (size_t)stride * h;
+
+    // Reuse if same size
+    if (s.buf_data && s.buf_size == size) {
+        s.buf_stride = stride;
+        return s.buf_data;
+    }
+
+    free_buffer(s);
 
     int fd = create_shm_file(size);
     if (fd < 0) return nullptr;
@@ -221,15 +237,18 @@ uint8_t *create_buffer(State &s, uint32_t w, uint32_t h, uint32_t &stride, struc
     if (data == MAP_FAILED) { close(fd); return nullptr; }
 
     auto *pool = wl_shm_create_pool(s.shm, fd, size);
-    *buf_out = wl_shm_pool_create_buffer(pool, 0, w, h, stride, WL_SHM_FORMAT_ARGB8888);
+    s.buf = wl_shm_pool_create_buffer(pool, 0, w, h, stride, WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool);
     close(fd);
 
+    s.buf_data = data;
+    s.buf_size = size;
+    s.buf_stride = stride;
     return data;
 }
 
-void commit(State &s, struct wl_buffer *buf) {
-    wl_surface_attach(s.wl_surf, buf, 0, 0);
+void commit(State &s) {
+    wl_surface_attach(s.wl_surf, s.buf, 0, 0);
     wl_surface_damage_buffer(s.wl_surf, 0, 0, s.width, s.height);
     wl_surface_commit(s.wl_surf);
 }
