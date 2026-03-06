@@ -5,20 +5,7 @@
 
 Lightweight workspace overview for [Hyprland](https://hyprland.org). Shows active workspaces with real window thumbnails, navigate with keyboard, press Enter to switch.
 
-```
-┌───────────────────────────────────────────┐
-│              (dimmed bg)                  │
-│                                           │
-│  ┌──── 1 ────────┐  ┌──── 2 ────────┐   │
-│  │ ┌──────┐┌───┐ │  │ ┌───────────┐ │   │
-│  │ │firefo││foot│ │  │ │  spotify  │ │   │
-│  │ │  x   ││    │ │  │ │  player   │ │   │
-│  │ └──────┘└───┘ │  │ └───────────┘ │   │
-│  │  [selected]   │  │               │   │
-│  └───────────────┘  └───────────────┘   │
-│                                           │
-└───────────────────────────────────────────┘
-```
+![Demo](demo.gif)
 
 ## Features
 
