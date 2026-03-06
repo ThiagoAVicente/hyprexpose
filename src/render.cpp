@@ -37,9 +37,11 @@ void draw(RenderContext &ctx, const std::vector<WorkspaceInfo> &workspaces,
         ctx.pixels, CAIRO_FORMAT_ARGB32, ctx.width, ctx.height, ctx.stride);
     auto *cr = cairo_create(surface);
 
-    // Dimmed background
+    // Dimmed background — use SOURCE to clear buffer fully
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, 0, 0, 0, BG_ALPHA);
     cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
     if (workspaces.empty()) {
         cairo_destroy(cr);
