@@ -1,0 +1,732 @@
+mod ipc;
+mod render;
+
+use render::Thumbnail;
+use ipc::WorkspaceInfo;
+
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use wayland_client::{
+    protocol::{
+        wl_buffer, wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_shm, wl_shm_pool,
+        wl_surface,
+    },
+    Connection, Dispatch, EventQueue, QueueHandle, WEnum,
+};
+use wayland_protocols_wlr::layer_shell::v1::client::{
+    zwlr_layer_shell_v1, zwlr_layer_surface_v1,
+};
+
+// Generated Hyprland protocol bindings
+#[allow(dead_code, non_camel_case_types, unused_unsafe, unused_variables)]
+#[allow(non_upper_case_globals, non_snake_case, unused_imports, missing_docs)]
+#[allow(clippy::all)]
+pub mod hyprland_toplevel_export {
+    use wayland_client;
+    use wayland_client::protocol::*;
+    use wayland_protocols_wlr::foreign_toplevel::v1::client::*;
+
+    pub mod __interfaces {
+        use wayland_client::protocol::__interfaces::*;
+        use wayland_protocols_wlr::foreign_toplevel::v1::client::__interfaces::*;
+        wayland_scanner::generate_interfaces!("protocols/hyprland-toplevel-export-v1.xml");
+    }
+    use self::__interfaces::*;
+
+    wayland_scanner::generate_client_code!("protocols/hyprland-toplevel-export-v1.xml");
+}
+use hyprland_toplevel_export::{
+    hyprland_toplevel_export_frame_v1, hyprland_toplevel_export_manager_v1,
+};
+use hyprland_toplevel_export_manager_v1::HyprlandToplevelExportManagerV1;
+use hyprland_toplevel_export_frame_v1::HyprlandToplevelExportFrameV1;
+
+// ── signal handling ─────────────────────────────────────────────────────────
+
+static G_QUIT: AtomicBool = AtomicBool::new(false);
+static G_TOGGLE: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" fn sig_handler(sig: libc::c_int) {
+    if sig == libc::SIGUSR1 {
+        G_TOGGLE.store(true, Ordering::Relaxed);
+    } else {
+        G_QUIT.store(true, Ordering::Relaxed);
+    }
+}
+
+// ── key mapping (evdev keycodes → XKB keysyms) ──────────────────────────────
+
+const XKB_KEY_ESCAPE: u32 = 0xff1b;
+const XKB_KEY_RETURN: u32 = 0xff0d;
+const XKB_KEY_LEFT:   u32 = 0xff51;
+const XKB_KEY_UP:     u32 = 0xff52;
+const XKB_KEY_RIGHT:  u32 = 0xff53;
+const XKB_KEY_DOWN:   u32 = 0xff54;
+const XKB_KEY_H: u32 = 0x0068;
+const XKB_KEY_J: u32 = 0x006a;
+const XKB_KEY_K: u32 = 0x006b;
+const XKB_KEY_L: u32 = 0x006c;
+
+fn keycode_to_keysym(keycode: u32) -> u32 {
+    match keycode {
+        1   => XKB_KEY_ESCAPE,
+        28  => XKB_KEY_RETURN,
+        105 => XKB_KEY_LEFT,
+        103 => XKB_KEY_UP,
+        106 => XKB_KEY_RIGHT,
+        108 => XKB_KEY_DOWN,
+        35  => XKB_KEY_H,
+        36  => XKB_KEY_J,
+        37  => XKB_KEY_K,
+        38  => XKB_KEY_L,
+        _   => 0,
+    }
+}
+
+// ── capture frame state ──────────────────────────────────────────────────────
+
+#[derive(Default)]
+struct CaptureFrameData {
+    format: u32,
+    width: u32,
+    height: u32,
+    stride: u32,
+    buffer_done: bool,
+    frame_ready: bool,
+    frame_failed: bool,
+}
+
+// ── application state ────────────────────────────────────────────────────────
+
+struct AppState {
+    // Wayland globals
+    compositor: Option<wl_compositor::WlCompositor>,
+    shm: Option<wl_shm::WlShm>,
+    seat: Option<wl_seat::WlSeat>,
+    layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+    toplevel_export: Option<HyprlandToplevelExportManagerV1>,
+
+    // Per-show Wayland objects (recreated on each show)
+    wl_surf: Option<wl_surface::WlSurface>,
+    layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
+    wl_buf: Option<wl_buffer::WlBuffer>,
+
+    // Surface / overlay state
+    width: u32,
+    height: u32,
+    configured: bool,
+    visible: bool,
+    should_close: bool,
+    needs_redraw: bool,
+
+    // App state
+    workspaces: Vec<WorkspaceInfo>,
+    thumbnails: Vec<Thumbnail>,
+    selected: usize,
+    no_preview: bool,
+
+    // In-flight capture state (sequential, one at a time)
+    pending_capture: Option<CaptureFrameData>,
+}
+
+impl AppState {
+    fn new(no_preview: bool) -> Self {
+        Self {
+            compositor: None,
+            shm: None,
+            seat: None,
+            layer_shell: None,
+            toplevel_export: None,
+            wl_surf: None,
+            layer_surface: None,
+            wl_buf: None,
+            width: 0,
+            height: 0,
+            configured: false,
+            visible: false,
+            should_close: false,
+            needs_redraw: false,
+            workspaces: Vec::new(),
+            thumbnails: Vec::new(),
+            selected: 0,
+            no_preview,
+            pending_capture: None,
+        }
+    }
+
+    /// Returns true if the overlay should be closed.
+    fn handle_key(&mut self, keysym: u32) -> bool {
+        let n = self.workspaces.len();
+        if n == 0 {
+            return true;
+        }
+        let cols = ((n as f64).sqrt().ceil() as usize).max(1);
+
+        match keysym {
+            XKB_KEY_ESCAPE => return true,
+            XKB_KEY_RETURN => {
+                if self.selected < n {
+                    ipc::switch_workspace(self.workspaces[self.selected].id);
+                }
+                return true;
+            }
+            XKB_KEY_RIGHT | XKB_KEY_L => {
+                if self.selected + 1 < n {
+                    self.selected += 1;
+                    self.needs_redraw = true;
+                }
+            }
+            XKB_KEY_LEFT | XKB_KEY_H => {
+                if self.selected > 0 {
+                    self.selected -= 1;
+                    self.needs_redraw = true;
+                }
+            }
+            XKB_KEY_DOWN | XKB_KEY_J => {
+                if self.selected + cols < n {
+                    self.selected += cols;
+                    self.needs_redraw = true;
+                }
+            }
+            XKB_KEY_UP | XKB_KEY_K => {
+                if self.selected >= cols {
+                    self.selected -= cols;
+                    self.needs_redraw = true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+}
+
+// ── wayland Dispatch impls ───────────────────────────────────────────────────
+
+impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        let wl_registry::Event::Global { name, interface, version } = event else { return };
+        match interface.as_str() {
+            "wl_compositor" => {
+                state.compositor = Some(registry.bind(name, version.min(4), qh, ()));
+            }
+            "wl_shm" => {
+                state.shm = Some(registry.bind(name, 1, qh, ()));
+            }
+            "wl_seat" => {
+                state.seat = Some(registry.bind(name, version.min(7), qh, ()));
+            }
+            "zwlr_layer_shell_v1" => {
+                state.layer_shell = Some(registry.bind(name, version.min(4), qh, ()));
+            }
+            "hyprland_toplevel_export_manager_v1" => {
+                state.toplevel_export = Some(registry.bind(name, 1, qh, ()));
+            }
+            _ => {}
+        }
+    }
+}
+
+wayland_client::delegate_noop!(AppState: ignore wl_compositor::WlCompositor);
+wayland_client::delegate_noop!(AppState: ignore wl_shm_pool::WlShmPool);
+wayland_client::delegate_noop!(AppState: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
+wayland_client::delegate_noop!(AppState: ignore HyprlandToplevelExportManagerV1);
+
+impl Dispatch<wl_shm::WlShm, ()> for AppState {
+    fn event(_: &mut Self, _: &wl_shm::WlShm, _: wl_shm::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<wl_buffer::WlBuffer, ()> for AppState {
+    fn event(_: &mut Self, _: &wl_buffer::WlBuffer, _: wl_buffer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<wl_surface::WlSurface, ()> for AppState {
+    fn event(_: &mut Self, _: &wl_surface::WlSurface, _: wl_surface::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(caps) } = event {
+            if caps.contains(wl_seat::Capability::Keyboard) {
+                seat.get_keyboard(qh, ());
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        _: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_keyboard::Event::Key {
+            key,
+            state: WEnum::Value(wl_keyboard::KeyState::Pressed),
+            ..
+        } = event
+        {
+            let keysym = keycode_to_keysym(key);
+            if keysym != 0 && state.handle_key(keysym) {
+                state.should_close = true;
+            }
+        }
+    }
+}
+
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
+                layer_surface.ack_configure(serial);
+                state.width = width;
+                state.height = height;
+                state.configured = true;
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                state.should_close = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<HyprlandToplevelExportFrameV1, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        _: &HyprlandToplevelExportFrameV1,
+        event: hyprland_toplevel_export_frame_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use hyprland_toplevel_export_frame_v1::Event;
+        let Some(cap) = state.pending_capture.as_mut() else { return };
+        match event {
+            Event::Buffer { format, width, height, stride } => {
+                // Convert WEnum<wl_shm::Format> to u32
+                cap.format = format.into();
+                cap.width = width;
+                cap.height = height;
+                cap.stride = stride;
+            }
+            Event::BufferDone => cap.buffer_done = true,
+            Event::Ready { .. } => cap.frame_ready = true,
+            Event::Failed => cap.frame_failed = true,
+            _ => {}
+        }
+    }
+}
+
+// ── Wayland surface management ───────────────────────────────────────────────
+
+fn create_shm_fd(size: usize) -> Option<OwnedFd> {
+    let name = c"hyprexpose";
+    let raw = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    if raw < 0 {
+        return None;
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    if unsafe { libc::ftruncate(raw, size as libc::off_t) } < 0 {
+        return None;
+    }
+    Some(fd)
+}
+
+fn show(state: &mut AppState, qh: &QueueHandle<AppState>) -> bool {
+    let (compositor, layer_shell) = match (&state.compositor, &state.layer_shell) {
+        (Some(c), Some(l)) => (c, l),
+        _ => return false,
+    };
+
+    state.should_close = false;
+    state.configured = false;
+
+    let wl_surf = compositor.create_surface(qh, ());
+    let layer_surface = layer_shell.get_layer_surface(
+        &wl_surf,
+        None,
+        zwlr_layer_shell_v1::Layer::Overlay,
+        "hyprexpose".to_owned(),
+        qh,
+        (),
+    );
+
+    use zwlr_layer_surface_v1::Anchor;
+    layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+    layer_surface.set_exclusive_zone(-1);
+    layer_surface.set_keyboard_interactivity(
+        zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive,
+    );
+
+    wl_surf.commit();
+
+    state.wl_surf = Some(wl_surf);
+    state.layer_surface = Some(layer_surface);
+    true
+}
+
+fn hide(state: &mut AppState) {
+    if let Some(buf) = state.wl_buf.take() {
+        buf.destroy();
+    }
+    if let Some(ls) = state.layer_surface.take() {
+        ls.destroy();
+    }
+    if let Some(surf) = state.wl_surf.take() {
+        surf.destroy();
+    }
+    state.configured = false;
+    state.visible = false;
+    state.workspaces.clear();
+    state.thumbnails.clear();
+}
+
+fn redraw(state: &mut AppState, qh: &QueueHandle<AppState>) {
+    if !state.configured || state.width == 0 || state.height == 0 {
+        return;
+    }
+
+    let pixels = render::draw(
+        state.width,
+        state.height,
+        &state.workspaces,
+        state.selected,
+        &state.thumbnails,
+    );
+
+    let stride = state.width * 4;
+    let size = pixels.len();
+
+    let Some(fd) = create_shm_fd(size) else { return };
+    let raw_fd = fd.as_fd().as_raw_fd();
+
+    let written = unsafe { libc::write(raw_fd, pixels.as_ptr() as *const libc::c_void, size) };
+    if written < 0 {
+        return;
+    }
+
+    let Some(shm) = &state.shm else { return };
+    let pool = shm.create_pool(fd.as_fd(), size as i32, qh, ());
+    drop(fd); // compositor mapped it; safe to close our end
+
+    let buf = pool.create_buffer(
+        0,
+        state.width as i32,
+        state.height as i32,
+        stride as i32,
+        wl_shm::Format::Argb8888,
+        qh,
+        (),
+    );
+    pool.destroy();
+
+    if let Some(surf) = &state.wl_surf {
+        surf.attach(Some(&buf), 0, 0);
+        surf.damage_buffer(0, 0, state.width as i32, state.height as i32);
+        surf.commit();
+    }
+
+    if let Some(old) = state.wl_buf.replace(buf) {
+        old.destroy();
+    }
+}
+
+// ── window capture ───────────────────────────────────────────────────────────
+
+fn capture_toplevel(
+    state: &mut AppState,
+    eq: &mut EventQueue<AppState>,
+    qh: &QueueHandle<AppState>,
+    address: u64,
+) -> Option<Thumbnail> {
+    state.toplevel_export.as_ref()?;
+
+    state.pending_capture = Some(CaptureFrameData::default());
+    let frame = state.toplevel_export.as_ref().unwrap()
+        .capture_toplevel(0, address as u32, qh, ());
+
+    // Phase 1: wait for buffer format info
+    loop {
+        eq.blocking_dispatch(state).ok()?;
+        let cap = state.pending_capture.as_ref()?;
+        if cap.buffer_done || cap.frame_failed {
+            break;
+        }
+    }
+
+    let cap = state.pending_capture.take()?;
+    if cap.frame_failed || cap.width == 0 || cap.height == 0 {
+        frame.destroy();
+        return None;
+    }
+
+    let size = (cap.stride * cap.height) as usize;
+
+    let cap_name = c"hyprexpose-cap";
+    let raw_fd = unsafe { libc::memfd_create(cap_name.as_ptr(), libc::MFD_CLOEXEC) };
+    if raw_fd < 0 {
+        frame.destroy();
+        return None;
+    }
+    unsafe { libc::ftruncate(raw_fd, size as libc::off_t) };
+
+    // mmap so we can read the pixels after capture completes
+    let mmap_ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            raw_fd,
+            0,
+        )
+    };
+    if mmap_ptr == libc::MAP_FAILED {
+        unsafe { libc::close(raw_fd) };
+        frame.destroy();
+        return None;
+    }
+
+    let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let Some(shm) = &state.shm else {
+        unsafe { libc::munmap(mmap_ptr, size) };
+        frame.destroy();
+        return None;
+    };
+
+    // Convert raw format value to wl_shm::Format
+    let wl_fmt = wl_shm::Format::try_from(cap.format)
+        .unwrap_or(wl_shm::Format::Argb8888);
+
+    let pool = shm.create_pool(owned_fd.as_fd(), size as i32, qh, ());
+    let wl_buf = pool.create_buffer(
+        0,
+        cap.width as i32,
+        cap.height as i32,
+        cap.stride as i32,
+        wl_fmt,
+        qh,
+        (),
+    );
+    pool.destroy();
+    drop(owned_fd); // compositor has the mapping; safe to close our fd end
+
+    // Phase 2: request frame copy and wait for ready/failed
+    state.pending_capture = Some(CaptureFrameData {
+        width: cap.width,
+        height: cap.height,
+        stride: cap.stride,
+        format: cap.format,
+        ..Default::default()
+    });
+
+    frame.copy(&wl_buf, 1);
+
+    loop {
+        eq.blocking_dispatch(state).ok()?;
+        let c = state.pending_capture.as_ref()?;
+        if c.frame_ready || c.frame_failed {
+            break;
+        }
+    }
+
+    let cap2 = state.pending_capture.take().unwrap_or_default();
+
+    let thumbnail = if cap2.frame_ready {
+        let pixels = unsafe {
+            std::slice::from_raw_parts(mmap_ptr as *const u8, size).to_vec()
+        };
+        Some(Thumbnail {
+            address,
+            data: pixels,
+            width: cap.width,
+            height: cap.height,
+            stride: cap.stride,
+        })
+    } else {
+        None
+    };
+
+    unsafe { libc::munmap(mmap_ptr, size) };
+    wl_buf.destroy();
+    frame.destroy();
+
+    thumbnail
+}
+
+// ── data refresh ─────────────────────────────────────────────────────────────
+
+fn refresh_data(
+    state: &mut AppState,
+    eq: &mut EventQueue<AppState>,
+    qh: &QueueHandle<AppState>,
+) {
+    state.workspaces = ipc::get_workspaces();
+    state.thumbnails.clear();
+
+    if !state.no_preview {
+        let addrs: Vec<u64> = state
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.clients.iter().map(|c| c.address))
+            .collect();
+
+        for addr in addrs {
+            if let Some(thumb) = capture_toplevel(state, eq, qh, addr) {
+                state.thumbnails.push(thumb);
+            }
+        }
+    }
+
+    let active = ipc::get_active_workspace();
+    state.selected = state
+        .workspaces
+        .iter()
+        .position(|ws| ws.id == active)
+        .unwrap_or(0);
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────
+
+fn main() {
+    let mut no_preview = false;
+    for arg in std::env::args().skip(1) {
+        if arg == "--no-preview" {
+            no_preview = true;
+        } else {
+            eprintln!("Usage: hyprexpose [--no-preview]");
+            std::process::exit(1);
+        }
+    }
+
+    // Install signal handlers
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = sig_handler as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+    }
+
+    let conn = Connection::connect_to_env().expect("failed to connect to Wayland display");
+    let mut eq: EventQueue<AppState> = conn.new_event_queue();
+    let qh = eq.handle();
+
+    let mut state = AppState::new(no_preview);
+
+    // Register registry listener and perform two roundtrips to discover all globals
+    conn.display().get_registry(&qh, ());
+    eq.roundtrip(&mut state).expect("Wayland roundtrip failed");
+    eq.roundtrip(&mut state).expect("Wayland roundtrip failed");
+
+    if state.compositor.is_none() || state.shm.is_none() || state.layer_shell.is_none() {
+        eprintln!("hyprexpose: missing required Wayland globals");
+        std::process::exit(1);
+    }
+
+    eprintln!("hyprexpose: daemon running (send SIGUSR1 to toggle)");
+
+    let display_fd = conn.as_fd().as_raw_fd();
+
+    'main: loop {
+        if G_QUIT.load(Ordering::Relaxed) {
+            break;
+        }
+
+        if G_TOGGLE.swap(false, Ordering::Relaxed) {
+            if state.visible {
+                hide(&mut state);
+                conn.flush().ok();
+            } else {
+                if show(&mut state, &qh) {
+                    conn.flush().ok();
+                    eq.roundtrip(&mut state).ok();
+                    if state.configured {
+                        state.visible = true;
+                        refresh_data(&mut state, &mut eq, &qh);
+                        redraw(&mut state, &qh);
+                        conn.flush().ok();
+                    }
+                }
+            }
+        }
+
+        if state.should_close && state.visible {
+            hide(&mut state);
+            conn.flush().ok();
+            state.should_close = false;
+        }
+
+        if state.needs_redraw && state.visible {
+            state.needs_redraw = false;
+            redraw(&mut state, &qh);
+            conn.flush().ok();
+        }
+
+        conn.flush().ok();
+
+        // Poll for events using prepare_read
+        let guard = match eq.prepare_read() {
+            Some(g) => g,
+            None => {
+                eq.dispatch_pending(&mut state).ok();
+                continue;
+            }
+        };
+
+        let mut pollfd = libc::pollfd {
+            fd: display_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        let ret = unsafe { libc::poll(&mut pollfd, 1, -1) };
+
+        if ret < 0 {
+            drop(guard);
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                // signal interrupted poll — loop back to check flags
+                eq.dispatch_pending(&mut state).ok();
+                continue;
+            }
+            break 'main;
+        }
+
+        if pollfd.revents & libc::POLLIN != 0 {
+            guard.read().ok();
+        } else {
+            drop(guard);
+        }
+
+        eq.dispatch_pending(&mut state).ok();
+    }
+
+    hide(&mut state);
+}
