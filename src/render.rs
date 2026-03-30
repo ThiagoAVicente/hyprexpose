@@ -35,6 +35,7 @@ fn draw_client(
     off_y: f64,
     thumbnails: &[Thumbnail],
     active_window_address: u64,
+    window_font: &pango::FontDescription,
 ) {
     let rx = off_x + (client.x - min_x) as f64 * scale;
     let ry = off_y + (client.y - min_y) as f64 * scale;
@@ -83,11 +84,10 @@ fn draw_client(
 
     // Window label (class name or title)
     if rw > 40.0 && rh > 20.0 {
-        let font = pango::FontDescription::from_string(&cfg.appearance.font);
         let layout = pangocairo::functions::create_layout(cr);
         let name = if client.class_name.is_empty() { &client.title } else { &client.class_name };
         layout.set_text(name);
-        layout.set_font_description(Some(&font));
+        layout.set_font_description(Some(window_font));
         layout.set_width(((rw - 4.0) * pango::SCALE as f64) as i32);
         layout.set_ellipsize(pango::EllipsizeMode::End);
         let (tw, th) = layout.pixel_size();
@@ -150,7 +150,8 @@ pub fn draw(
     let oy = (height as f64 - grid_h) / 2.0;
 
     let label_font = pango::FontDescription::from_string(&cfg.appearance.label_font);
-    let empty_font = pango::FontDescription::from_string(&cfg.appearance.font);
+    let window_font = pango::FontDescription::from_string(&cfg.appearance.font);
+    let empty_font = window_font.clone();
 
     for (i, ws) in workspaces.iter().enumerate() {
         let col = i % cols;
@@ -158,13 +159,13 @@ pub fn draw(
         let cx = ox + col as f64 * (card_w + pad);
         let cy = oy + row as f64 * (card_h + pad);
         let r = cfg.appearance.card_radius;
-        let sb = cfg.appearance.select_border;
+        let select_border_w = cfg.appearance.select_border;
 
         // Selection highlight
         if i == selected_index {
-            let (sr, sg, sb_c, sa) = cfg.colors.selection.rgba();
-            rounded_rect(&cr, cx - sb, cy - sb, card_w + 2.0 * sb, card_h + 2.0 * sb, r + 2.0);
-            cr.set_source_rgba(sr, sg, sb_c, sa);
+            let (sr, sg, sb, sa) = cfg.colors.selection.rgba();
+            rounded_rect(&cr, cx - select_border_w, cy - select_border_w, card_w + 2.0 * select_border_w, card_h + 2.0 * select_border_w, r + 2.0);
+            cr.set_source_rgba(sr, sg, sb, sa);
             cr.fill().ok();
         }
 
@@ -211,10 +212,12 @@ pub fn draw(
         }
 
         // Scale all client rects to fit the window area
-        let min_x = ws.clients.iter().map(|c| c.x).min().unwrap_or(0);
-        let min_y = ws.clients.iter().map(|c| c.y).min().unwrap_or(0);
-        let max_x = ws.clients.iter().map(|c| c.x + c.w).max().unwrap_or(1);
-        let max_y = ws.clients.iter().map(|c| c.y + c.h).max().unwrap_or(1);
+        let (min_x, min_y, max_x, max_y) = ws.clients.iter().fold(
+            (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+            |(mix, miy, mxx, mxy), c| {
+                (mix.min(c.x), miy.min(c.y), mxx.max(c.x + c.w), mxy.max(c.y + c.h))
+            },
+        );
 
         let ws_w = (max_x - min_x).max(1) as f64;
         let ws_h = (max_y - min_y).max(1) as f64;
@@ -224,7 +227,7 @@ pub fn draw(
         let off_y = win_y + (win_h - ws_h * scale) / 2.0;
 
         for client in &ws.clients {
-            draw_client(&cr, cfg, client, min_x, min_y, scale, off_x, off_y, thumbnails, active_window_address);
+            draw_client(&cr, cfg, client, min_x, min_y, scale, off_x, off_y, thumbnails, active_window_address, &window_font);
         }
     }
 

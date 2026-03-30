@@ -20,15 +20,10 @@ impl Color {
     }
 }
 
-impl From<(f64, f64, f64, f64)> for Color {
-    fn from(t: (f64, f64, f64, f64)) -> Self {
-        Color::Array([t.0, t.1, t.2, t.3])
-    }
-}
 
 /// Newtype so serde can deserialize a hex string into an RGBA tuple.
 #[derive(Clone, Copy)]
-pub struct HexColor(pub (f64, f64, f64, f64));
+pub struct HexColor((f64, f64, f64, f64));
 
 impl<'de> Deserialize<'de> for HexColor {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -118,13 +113,13 @@ pub struct ColorsConfig {
 impl Default for ColorsConfig {
     fn default() -> Self {
         Self {
-            background:    (0.0,  0.0,  0.0,  0.75).into(),
-            card:          (0.12, 0.12, 0.15, 0.95).into(),
-            selection:     (0.4,  0.6,  1.0,  0.9 ).into(),
-            label:         (0.85, 0.85, 0.9,  1.0 ).into(),
-            empty_label:   (0.5,  0.5,  0.55, 0.8 ).into(),
-            window_label:  (1.0,  1.0,  1.0,  0.9 ).into(),
-            active_window: (1.0,  0.75, 0.2,  0.95).into(),
+            background:    Color::Array([0.0,  0.0,  0.0,  0.75]),
+            card:          Color::Array([0.12, 0.12, 0.15, 0.95]),
+            selection:     Color::Array([0.4,  0.6,  1.0,  0.9 ]),
+            label:         Color::Array([0.85, 0.85, 0.9,  1.0 ]),
+            empty_label:   Color::Array([0.5,  0.5,  0.55, 0.8 ]),
+            window_label:  Color::Array([1.0,  1.0,  1.0,  0.9 ]),
+            active_window: Color::Array([1.0,  0.75, 0.2,  0.95]),
         }
     }
 }

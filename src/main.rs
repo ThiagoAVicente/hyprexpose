@@ -442,7 +442,7 @@ fn redraw(state: &mut AppState, qh: &QueueHandle<AppState>) {
     );
 
     let stride = state.width * 4;
-    let size = pixels.len();
+    let size = (stride * state.height) as usize;
 
     let Some(fd) = create_shm_fd(size) else { return };
     let raw_fd = fd.as_fd().as_raw_fd();
@@ -486,11 +486,9 @@ fn capture_toplevel(
     qh: &QueueHandle<AppState>,
     address: u64,
 ) -> Option<Thumbnail> {
-    state.toplevel_export.as_ref()?;
-
+    let manager = state.toplevel_export.as_ref()?;
     state.pending_capture = Some(CaptureFrameData::default());
-    let frame = state.toplevel_export.as_ref().unwrap()
-        .capture_toplevel(0, address as u32, qh, ());
+    let frame = manager.capture_toplevel(0, address as u32, qh, ());
 
     // Phase 1: wait for buffer format info
     loop {
