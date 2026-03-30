@@ -5,8 +5,6 @@
 
 Lightweight workspace overview for [Hyprland](https://hyprland.org). Shows active workspaces with real window thumbnails, navigate with keyboard, press Enter to switch.
 
-> **Note:** This project has been rewritten in Rust. The previous C++ implementation has been removed.
-
 ![Demo](demo.gif)
 
 ## Features
