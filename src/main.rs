@@ -1,6 +1,8 @@
+mod config;
 mod ipc;
 mod render;
 
+use config::Config;
 use render::Thumbnail;
 use ipc::WorkspaceInfo;
 
@@ -67,6 +69,7 @@ const XKB_KEY_H: u32 = 0x0068;
 const XKB_KEY_J: u32 = 0x006a;
 const XKB_KEY_K: u32 = 0x006b;
 const XKB_KEY_L: u32 = 0x006c;
+const XKB_KEY_M: u32 = 0x006d;
 
 fn keycode_to_keysym(keycode: u32) -> u32 {
     match keycode {
@@ -80,6 +83,7 @@ fn keycode_to_keysym(keycode: u32) -> u32 {
         36  => XKB_KEY_J,
         37  => XKB_KEY_K,
         38  => XKB_KEY_L,
+        50  => XKB_KEY_M,
         _   => 0,
     }
 }
@@ -125,13 +129,17 @@ struct AppState {
     thumbnails: Vec<Thumbnail>,
     selected: usize,
     no_preview: bool,
+    active_window_address: u64,
+    config: Config,
 
     // In-flight capture state (sequential, one at a time)
     pending_capture: Option<CaptureFrameData>,
 }
 
 impl AppState {
-    fn new(no_preview: bool) -> Self {
+    fn new(no_preview: bool, config: Config) -> Self {
+        // CLI --no-preview flag overrides config
+        let no_preview = no_preview || config.behavior.no_preview;
         Self {
             compositor: None,
             shm: None,
@@ -151,6 +159,8 @@ impl AppState {
             thumbnails: Vec::new(),
             selected: 0,
             no_preview,
+            active_window_address: 0,
+            config,
             pending_capture: None,
         }
     }
@@ -193,6 +203,16 @@ impl AppState {
                 if self.selected >= cols {
                     self.selected -= cols;
                     self.needs_redraw = true;
+                }
+            }
+            XKB_KEY_M => {
+                if self.active_window_address != 0 && self.selected < n {
+                    let target_id = self.workspaces[self.selected].id;
+                    ipc::move_window_to_workspace(self.active_window_address, target_id);
+                    if self.config.behavior.switch_on_move {
+                        ipc::switch_workspace(target_id);
+                    }
+                    return true; // close overlay
                 }
             }
             _ => {}
@@ -417,6 +437,8 @@ fn redraw(state: &mut AppState, qh: &QueueHandle<AppState>) {
         &state.workspaces,
         state.selected,
         &state.thumbnails,
+        &state.config,
+        state.active_window_address,
     );
 
     let stride = state.width * 4;
@@ -586,6 +608,8 @@ fn refresh_data(
     eq: &mut EventQueue<AppState>,
     qh: &QueueHandle<AppState>,
 ) {
+    // Capture the focused window before the overlay steals keyboard focus.
+    state.active_window_address = ipc::get_active_window_address();
     state.workspaces = ipc::get_workspaces();
     state.thumbnails.clear();
 
@@ -638,7 +662,8 @@ fn main() {
     let mut eq: EventQueue<AppState> = conn.new_event_queue();
     let qh = eq.handle();
 
-    let mut state = AppState::new(no_preview);
+    let config = Config::load();
+    let mut state = AppState::new(no_preview, config);
 
     // Register registry listener and perform two roundtrips to discover all globals
     conn.display().get_registry(&qh, ());

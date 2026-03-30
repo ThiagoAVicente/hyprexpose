@@ -190,16 +190,36 @@ pub fn get_workspaces() -> Vec<WorkspaceInfo> {
     workspaces
 }
 
-pub fn switch_workspace(id: i32) {
+fn dispatch(cmd: &str) {
     let Some(path) = socket_path() else { return };
     let Ok(mut stream) = UnixStream::connect(&path) else { return };
-    let cmd = format!("/dispatch workspace {id}");
-    let _ = stream.write_all(cmd.as_bytes());
+    let msg = format!("/dispatch {cmd}");
+    let _ = stream.write_all(msg.as_bytes());
     let mut buf = [0u8; 256];
     let _ = stream.read(&mut buf);
+}
+
+pub fn switch_workspace(id: i32) {
+    dispatch(&format!("workspace {id}"));
+}
+
+pub fn move_window_to_workspace(window_address: u64, workspace_id: i32) {
+    dispatch(&format!(
+        "movetoworkspacesilent {workspace_id},address:0x{window_address:x}"
+    ));
 }
 
 pub fn get_active_workspace() -> i32 {
     let json = hypr_request("activeworkspace").unwrap_or_default();
     json_int(&json, "id") as i32
+}
+
+/// Returns the address of the currently focused window, or 0 if none.
+pub fn get_active_window_address() -> u64 {
+    let json = hypr_request("activewindow").unwrap_or_default();
+    // Hyprland returns `{}` when no window is focused
+    if json.trim() == "{}" {
+        return 0;
+    }
+    parse_address(&json)
 }
