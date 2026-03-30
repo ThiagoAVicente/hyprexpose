@@ -5,6 +5,8 @@
 
 Lightweight workspace overview for [Hyprland](https://hyprland.org). Shows active workspaces with real window thumbnails, navigate with keyboard, press Enter to switch.
 
+> **Note:** This project has been rewritten in Rust. The previous C++ implementation has been removed.
+
 ![Demo](demo.gif)
 
 ## Features
@@ -12,27 +14,34 @@ Lightweight workspace overview for [Hyprland](https://hyprland.org). Shows activ
 - Real window thumbnails via hyprland-toplevel-export protocol
 - Fullscreen overlay using wlr-layer-shell
 - Keyboard navigation (arrow keys / hjkl)
+- Move the active window to another workspace with `m`
 - Runs as a daemon, toggled with SIGUSR1 (~0% CPU when hidden)
 - Direct IPC via Hyprland's unix socket (no process spawning)
-- No runtime dependencies beyond Hyprland itself
+- TOML config file for colors, fonts, and behavior
 
 ## Dependencies
 
-**Build:** `wayland-scanner`
-
-**Runtime:** `wayland-client` `cairo` `pango`
+**Build:** Rust toolchain (`cargo`), `libwayland-dev`, `libpango1.0-dev`
 
 On Arch:
 
 ```
-pacman -S wayland cairo pango
+pacman -S rust wayland pango
+```
+
+On Ubuntu/Debian:
+
+```
+apt install cargo libwayland-dev libpango1.0-dev
 ```
 
 ## Build
 
 ```
-make
+cargo build --release
 ```
+
+The binary is at `target/release/hyprexpose`.
 
 ## Usage
 
@@ -73,7 +82,21 @@ yay -S hyprexpose-git
 |---|---|
 | Arrow keys / hjkl | Navigate workspaces |
 | Enter | Switch to selected workspace |
+| `m` | Move active window to selected workspace |
 | Escape | Close overlay |
+
+## Configuration
+
+Copy the example config and edit to taste:
+
+```
+mkdir -p ~/.config/hyprexpose
+cp config.example.toml ~/.config/hyprexpose/config.toml
+```
+
+Config is loaded from `$XDG_CONFIG_HOME/hyprexpose/config.toml` (falls back to `~/.config/hyprexpose/config.toml`). All fields are optional — defaults are used for anything not specified.
+
+See [`config.example.toml`](config.example.toml) for all available options with inline documentation.
 
 ## How it works
 
@@ -82,7 +105,7 @@ hyprexpose runs as a background daemon that does nothing until it receives SIGUS
 1. Queries Hyprland's IPC socket for active workspaces and clients
 2. Captures window thumbnails via the hyprland-toplevel-export protocol
 3. Renders workspace cards with Cairo/Pango onto a wlr-layer-shell overlay
-4. Waits for keyboard input, then switches workspace and hides
+4. Waits for keyboard input, then switches workspace (or moves a window) and hides
 
 ## License
 
