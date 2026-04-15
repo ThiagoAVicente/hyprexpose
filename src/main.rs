@@ -72,18 +72,19 @@ const XKB_KEY_L: u32 = 0x006c;
 const XKB_KEY_M: u32 = 0x006d;
 
 fn keycode_to_keysym(keycode: u32) -> u32 {
+    // Wayland sends XKB keycodes = evdev + 8
     match keycode {
-        1   => XKB_KEY_ESCAPE,
-        28  => XKB_KEY_RETURN,
-        105 => XKB_KEY_LEFT,
-        103 => XKB_KEY_UP,
-        106 => XKB_KEY_RIGHT,
-        108 => XKB_KEY_DOWN,
-        35  => XKB_KEY_H,
-        36  => XKB_KEY_J,
-        37  => XKB_KEY_K,
-        38  => XKB_KEY_L,
-        50  => XKB_KEY_M,
+        9   => XKB_KEY_ESCAPE,  // evdev 1
+        36  => XKB_KEY_RETURN,  // evdev 28
+        113 => XKB_KEY_LEFT,    // evdev 105
+        111 => XKB_KEY_UP,      // evdev 103
+        114 => XKB_KEY_RIGHT,   // evdev 106
+        116 => XKB_KEY_DOWN,    // evdev 108
+        43  => XKB_KEY_H,       // evdev 35
+        44  => XKB_KEY_J,       // evdev 36
+        45  => XKB_KEY_K,       // evdev 37
+        46  => XKB_KEY_L,       // evdev 38
+        58  => XKB_KEY_M,       // evdev 50
         _   => 0,
     }
 }
