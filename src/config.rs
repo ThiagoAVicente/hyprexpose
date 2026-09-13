@@ -73,6 +73,10 @@ pub struct AppearanceConfig {
     pub thumb_padding: f64,
     /// Width of the selection highlight border (px).
     pub select_border: f64,
+    /// Where to draw window class/title labels: "center" (over the middle of
+    /// each thumbnail) or "below" (a strip under the thumbnail area, mirroring
+    /// the workspace label strip at the top).
+    pub window_label_position: String,
 }
 
 impl Default for AppearanceConfig {
@@ -87,6 +91,7 @@ impl Default for AppearanceConfig {
             label_height: 32.0,
             thumb_padding: 8.0,
             select_border: 3.0,
+            window_label_position: "center".into(),
         }
     }
 }

@@ -32,6 +32,13 @@ thumb_padding = 8.0
 # Width of the selection highlight border drawn around the active card (px).
 select_border = 3.0
 
+# Where window class / title labels are drawn:
+#   "center" — over the middle of each thumbnail (default)
+#   "below"  — in a strip under the thumbnail area, mirroring the workspace
+#              label at the top (label_height tall; multiple windows are
+#              listed as "app · app")
+window_label_position = "center"
+
 # ── Colors ────────────────────────────────────────────────────────────────────
 # Colors can be written as:
 #   "#rrggbb"   — hex RGB, fully opaque
