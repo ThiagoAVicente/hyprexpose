@@ -111,8 +111,9 @@ fn draw_client(
         cr.stroke().ok();
     }
 
-    // Window label (class name or title)
-    if rw > 40.0 && rh > 20.0 {
+    // Window label (class name or title). Skipped when labels are drawn in
+    // the strip below the thumbnail area instead (see build_scene).
+    if cfg.appearance.window_label_position != "below" && rw > 40.0 && rh > 20.0 {
         let layout = pangocairo::functions::create_layout(cr);
         let name = if client.class_name.is_empty() { &client.title } else { &client.class_name };
         layout.set_text(name);
@@ -206,10 +207,13 @@ pub fn build_scene(
 
         let lh = cfg.appearance.label_height;
         let tp = cfg.appearance.thumb_padding;
+        let labels_below = cfg.appearance.window_label_position == "below";
+        // Mirror the workspace-label strip at the bottom when window labels go there.
+        let bottom = if labels_below { lh } else { tp };
         let win_x = cx + tp;
         let win_y = cy + lh;
         let win_w = card_w - 2.0 * tp;
-        let win_h = card_h - lh - tp;
+        let win_h = card_h - lh - bottom;
 
         if ws.clients.is_empty() {
             let layout = pangocairo::functions::create_layout(&cr);
@@ -240,6 +244,29 @@ pub fn build_scene(
 
         for client in &ws.clients {
             draw_client(&cr, cfg, client, min_x, min_y, scale, off_x, off_y, thumbnails, active_window_address, &window_font);
+        }
+
+        // Window labels in the strip below the thumbnails: one entry per
+        // distinct class (or title), in window order.
+        if labels_below {
+            let mut names: Vec<&str> = Vec::new();
+            for c in &ws.clients {
+                let name = if c.class_name.is_empty() { c.title.as_str() } else { c.class_name.as_str() };
+                if !name.is_empty() && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            let layout = pangocairo::functions::create_layout(&cr);
+            layout.set_text(&names.join("  ·  "));
+            layout.set_font_description(Some(&window_font));
+            layout.set_width(((card_w - 2.0 * tp) * pango::SCALE as f64) as i32);
+            layout.set_ellipsize(pango::EllipsizeMode::End);
+            layout.set_alignment(pango::Alignment::Center);
+            let (_, th) = layout.pixel_size();
+            let (wr, wg, wb, wa) = cfg.colors.window_label.rgba();
+            cr.set_source_rgba(wr, wg, wb, wa);
+            cr.move_to(cx + tp, cy + card_h - lh + (lh - th as f64) / 2.0);
+            pangocairo::functions::show_layout(&cr, &layout);
         }
     }
 
