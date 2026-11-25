@@ -965,10 +965,22 @@ fn refresh_data(
     // compositors (e.g. Sway) the manager is absent and we fall back to
     // colored rectangles.
     if !state.no_preview && state.toplevel_export.is_some() {
+        // Hyprland only renders a window that overlaps its own monitor, so a
+        // window lying entirely outside it (e.g. stranded by a monitor layout
+        // change) would never answer the capture. Skip those up front so they
+        // do not each cost a CAPTURE_TIMEOUT; the timeout stays the safety net
+        // for anything this does not predict.
+        let monitors = ipc::get_monitors();
         let addrs: Vec<u64> = state
             .workspaces
             .iter()
-            .flat_map(|ws| ws.clients.iter().map(|c| c.address))
+            .flat_map(|ws| {
+                let monitor = monitors.iter().find(|m| m.id == ws.monitor_id);
+                ws.clients
+                    .iter()
+                    .filter(move |c| monitor.is_none_or(|m| m.overlaps(c)))
+                    .map(|c| c.address)
+            })
             .collect();
 
         for addr in addrs {

@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 
-use super::{ClientInfo, WorkspaceInfo};
+use super::{ClientInfo, MonitorInfo, WorkspaceInfo};
 
 
 fn socket_path() -> Option<String> {
@@ -46,6 +46,17 @@ fn json_int(json: &str, key: &str) -> i64 {
         .take_while(|c| c.is_ascii_digit() || *c == '-')
         .collect();
     num.parse().unwrap_or(0)
+}
+
+fn json_float(json: &str, key: &str) -> f64 {
+    let needle = format!("\"{key}\":");
+    let Some(pos) = json.find(&needle) else { return 0.0 };
+    let rest = json[pos + needle.len()..].trim_start_matches([' ', '\t']);
+    let num: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '.')
+        .collect();
+    num.parse().unwrap_or(0.0)
 }
 
 fn json_array_objects(json: &str) -> Vec<&str> {
@@ -173,6 +184,35 @@ pub fn get_workspaces() -> Vec<WorkspaceInfo> {
     workspaces
 }
 
+fn parse_monitors(json: &str) -> Vec<MonitorInfo> {
+    json_array_objects(json)
+        .iter()
+        .filter_map(|mj| {
+            let scale = json_float(mj, "scale");
+            if scale <= 0.0 {
+                return None;
+            }
+            // `width`/`height` are the mode in pixels, before scale and rotation.
+            let mut w = (json_int(mj, "width") as f64 / scale).ceil() as i32;
+            let mut h = (json_int(mj, "height") as f64 / scale).ceil() as i32;
+            if json_int(mj, "transform") % 2 == 1 {
+                std::mem::swap(&mut w, &mut h);
+            }
+            Some(MonitorInfo {
+                id: json_int(mj, "id") as i32,
+                x: json_int(mj, "x") as i32,
+                y: json_int(mj, "y") as i32,
+                w,
+                h,
+            })
+        })
+        .collect()
+}
+
+pub fn get_monitors() -> Vec<MonitorInfo> {
+    parse_monitors(&hypr_request("monitors").unwrap_or_default())
+}
+
 fn dispatch(cmd: &str) {
     let Some(path) = socket_path() else { return };
     let Ok(mut stream) = UnixStream::connect(&path) else { return };
@@ -206,4 +246,50 @@ pub fn get_active_window_address() -> u64 {
         return 0;
     }
     parse_address(&json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(x: i32, y: i32, w: i32, h: i32) -> ClientInfo {
+        ClientInfo {
+            class_name: String::new(),
+            title: String::new(),
+            address: 0,
+            workspace_id: 1,
+            x,
+            y,
+            w,
+            h,
+        }
+    }
+
+    #[test]
+    fn monitor_rect_is_scaled_and_rotated() {
+        let json = r#"[{
+            "id": 1, "name": "DP-1", "width": 3840, "height": 2160, "x": 1934, "y": 0,
+            "activeWorkspace": { "id": 4, "name": "4" },
+            "scale": 1.5, "transform": 3
+        },{
+            "id": 2, "name": "DP-2", "width": 3840, "height": 2160, "x": 3374, "y": 835,
+            "activeWorkspace": { "id": 5, "name": "5" },
+            "scale": 1.5, "transform": 0
+        }]"#;
+        let monitors = parse_monitors(json);
+        assert_eq!(monitors.len(), 2);
+        let (m1, m2) = (monitors[0], monitors[1]);
+        assert_eq!((m1.id, m1.x, m1.y, m1.w, m1.h), (1, 1934, 0, 1440, 2560));
+        assert_eq!((m2.id, m2.x, m2.y, m2.w, m2.h), (2, 3374, 835, 2560, 1440));
+    }
+
+    #[test]
+    fn overlap_needs_at_least_one_pixel() {
+        let m = MonitorInfo { id: 2, x: 3374, y: 835, w: 2560, h: 1440 };
+        assert!(m.overlaps(&client(3474, 935, 600, 400)));
+        assert!(m.overlaps(&client(4354, 436, 600, 400))); // one row on the monitor
+        assert!(!m.overlaps(&client(4354, 435, 600, 400))); // touching the top edge
+        assert!(!m.overlaps(&client(1994, 60, 600, 400))); // on a neighbouring monitor
+        assert!(!m.overlaps(&client(-12000, 200, 600, 400)));
+    }
 }
