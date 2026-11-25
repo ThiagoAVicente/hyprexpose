@@ -8,6 +8,7 @@ use ipc::WorkspaceInfo;
 
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use wayland_client::{
     protocol::{
@@ -775,6 +776,53 @@ fn redraw(state: &mut AppState, qh: &QueueHandle<AppState>) {
 
 // ── window capture ───────────────────────────────────────────────────────────
 
+/// Longest a single window capture may take before the window is shown as a
+/// placeholder instead. A normal capture completes within one frame.
+const CAPTURE_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Dispatch Wayland events until `done` holds. Returns false if `deadline`
+/// passes (or the connection fails) first.
+fn dispatch_until(
+    eq: &mut EventQueue<AppState>,
+    state: &mut AppState,
+    deadline: Instant,
+    done: impl Fn(&AppState) -> bool,
+) -> bool {
+    loop {
+        if eq.dispatch_pending(state).is_err() {
+            return false;
+        }
+        if done(state) {
+            return true;
+        }
+        if eq.flush().is_err() {
+            return false;
+        }
+        let Some(guard) = eq.prepare_read() else { continue };
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let mut pollfd = libc::pollfd {
+            fd: guard.connection_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout_ms = remaining.as_millis().clamp(1, 1000) as libc::c_int;
+        let ret = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+
+        if ret > 0 {
+            guard.read().ok();
+        } else {
+            drop(guard);
+            if ret < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return false;
+            }
+        }
+    }
+}
+
 fn capture_toplevel(
     state: &mut AppState,
     eq: &mut EventQueue<AppState>,
@@ -785,13 +833,20 @@ fn capture_toplevel(
     state.pending_capture = Some(CaptureFrameData::default());
     let frame = manager.capture_toplevel(0, address as u32, qh, ());
 
+    // A window the compositor never renders (e.g. a floating window that sits
+    // outside its monitor) gets no reply at all, so every wait is bounded.
+    let deadline = Instant::now() + CAPTURE_TIMEOUT;
+
     // Phase 1: wait for buffer format info
-    loop {
-        eq.blocking_dispatch(state).ok()?;
-        let cap = state.pending_capture.as_ref()?;
-        if cap.buffer_done || cap.frame_failed {
-            break;
-        }
+    let answered = dispatch_until(eq, state, deadline, |s| {
+        s.pending_capture
+            .as_ref()
+            .is_none_or(|c| c.buffer_done || c.frame_failed)
+    });
+    if !answered {
+        state.pending_capture = None;
+        frame.destroy();
+        return None;
     }
 
     let cap = state.pending_capture.take()?;
@@ -862,13 +917,13 @@ fn capture_toplevel(
 
     frame.copy(&wl_buf, 1);
 
-    loop {
-        eq.blocking_dispatch(state).ok()?;
-        let c = state.pending_capture.as_ref()?;
-        if c.frame_ready || c.frame_failed {
-            break;
-        }
-    }
+    // On a timeout `frame_ready` stays false and the window falls back to
+    // its placeholder; the frame is destroyed below either way.
+    dispatch_until(eq, state, deadline, |s| {
+        s.pending_capture
+            .as_ref()
+            .is_none_or(|c| c.frame_ready || c.frame_failed)
+    });
 
     let cap2 = state.pending_capture.take().unwrap_or_default();
 
