@@ -20,9 +20,26 @@ pub struct ClientInfo {
 pub struct WorkspaceInfo {
     pub id: i32,
     pub name: String,
-    #[allow(dead_code)]
     pub monitor_id: i32,
     pub clients: Vec<ClientInfo>,
+}
+
+/// A monitor's rectangle in the layout (logical) coordinates that client
+/// positions use.
+#[derive(Debug, Clone, Copy)]
+pub struct MonitorInfo {
+    pub id: i32,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl MonitorInfo {
+    /// Whether any part of the client lies on this monitor.
+    pub fn overlaps(&self, c: &ClientInfo) -> bool {
+        c.x < self.x + self.w && c.x + c.w > self.x && c.y < self.y + self.h && c.y + c.h > self.y
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +74,15 @@ pub fn get_workspaces() -> Vec<WorkspaceInfo> {
     match compositor() {
         Compositor::Hyprland => hyprland::get_workspaces(),
         Compositor::Sway => sway::get_workspaces(),
+    }
+}
+
+/// Monitor rectangles, or an empty list where they are not needed (window
+/// capture is Hyprland-only).
+pub fn get_monitors() -> Vec<MonitorInfo> {
+    match compositor() {
+        Compositor::Hyprland => hyprland::get_monitors(),
+        Compositor::Sway => Vec::new(),
     }
 }
 
